@@ -3,17 +3,20 @@ import {
   GraphQLRequest,
   ApolloLink,
   FetchResult,
-  Observable
+  Observable,
 } from 'apollo-link';
 import {
   addTypenameToDocument,
   removeClientSetsFromDocument,
   removeConnectionDirectiveFromDocument,
   cloneDeep,
-  isEqual
+  isEqual,
 } from 'apollo-utilities';
 import { print } from 'graphql/language/printer';
+import { getOperationAST } from 'graphql';
 import stringify from 'fast-json-stable-stringify';
+import values from 'lodash/values';
+import diff from 'jest-diff/build/index';
 
 import { MockedResponse, ResultFunction } from './types';
 
@@ -23,6 +26,34 @@ function requestToKey(request: GraphQLRequest, addTypename: Boolean): string {
     print(addTypename ? addTypenameToDocument(request.query) : request.query);
   const requestKey = { query: queryString };
   return JSON.stringify(requestKey);
+}
+
+function diffRequest(
+  actualRequest: GraphQLRequest,
+  expectedRequest: GraphQLRequest,
+  addTypename?: Boolean
+): string {
+  return (
+    diff(
+      requestToString(actualRequest, addTypename),
+      requestToString(expectedRequest)
+    ) || ''
+  );
+}
+
+function requestToString(
+  request: GraphQLRequest,
+  addTypename?: Boolean
+): string {
+  const query = print(
+    addTypename ? addTypenameToDocument(request.query) : request.query
+  );
+  const variables = request.variables
+    ? JSON.stringify(request.variables, null, 2)
+    : '{}';
+  const operationAST = getOperationAST(request.query, null);
+  const operationName = operationAST ? operationAST.operation : 'query';
+  return `${operationName}:\n${query}variables:\n${variables}`;
 }
 
 export class MockLink extends ApolloLink {
@@ -36,7 +67,7 @@ export class MockLink extends ApolloLink {
     super();
     this.addTypename = addTypename;
     if (mockedResponses)
-      mockedResponses.forEach(mockedResponse => {
+      mockedResponses.forEach((mockedResponse) => {
         this.addMockedResponse(mockedResponse);
       });
   }
@@ -78,10 +109,20 @@ export class MockLink extends ApolloLink {
     );
 
     if (!response || typeof responseIndex === 'undefined') {
+      const queryDiffs = (<string[]>[]).concat(
+        ...values(this.mockedResponsesByKey).map((mockedResponses: any) =>
+          mockedResponses.map((mockedResponse: any) =>
+            diffRequest(mockedResponse.request, operation, this.addTypename)
+          )
+        )
+      );
+
       throw new Error(
-        `No more mocked responses for the query: ${print(
-          operation.query
-        )}, variables: ${JSON.stringify(operation.variables)}`
+        `No more mocked responses for ${requestToString(operation)}${
+          queryDiffs.length
+            ? `\n\nPossible matches:\n${queryDiffs.join('\n')}`
+            : ''
+        }`
       );
     }
 
@@ -102,7 +143,7 @@ export class MockLink extends ApolloLink {
       );
     }
 
-    return new Observable(observer => {
+    return new Observable((observer) => {
       let timer = setTimeout(
         () => {
           if (error) {
